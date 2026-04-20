@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Study Assistant Agent — FastAPI on Lambda + API Gateway + DynamoDB + Bedrock
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.12
+    Environment:
+      Variables:
+        CHAT_HISTORY_TABLE_NAME: !Ref SessionTable
+        LLM_MODEL: anthropic.claude-3-haiku-20240307-v1:0
+
+Resources:
+
+  # ── DynamoDB table for session history ──────────────────────────────────────
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: StudyAssistantSessions
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ── Lambda function ──────────────────────────────────────────────────────────
+  StudyAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: StudyAssistantAgent
+      CodeUri: app/
+      Handler: main.handler
+      Description: Study Assistant agentic LLM app (FastAPI + Mangum + Bedrock)
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionTable
+        # Grants InvokeModel on Claude Haiku specifically.
+        # To allow all Bedrock models instead, change Resource to "*".
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+      Events:
+        ApiRoot:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: ANY
+            ApiId: !Ref StudyAssistantApi
+        ApiProxy:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+            ApiId: !Ref StudyAssistantApi
+
+  # ── HTTP API Gateway (v2) ────────────────────────────────────────────────────
+  StudyAssistantApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Description: Study Assistant Agent API
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+
+Outputs:
+  ApiUrl:
+    Description: Public URL of the deployed application
+    Value: !Sub "https://${StudyAssistantApi}.execute-api.${AWS::Region}.amazonaws.com"
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt StudyAssistantFunction.Arn
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref SessionTable
