@@ -5,14 +5,26 @@ Description: Study Assistant Agent — FastAPI on Lambda + API Gateway + DynamoD
 Globals:
   Function:
     Timeout: 30
-    MemorySize: 512
+    MemorySize: 1024
     Runtime: python3.12
     Environment:
       Variables:
         CHAT_HISTORY_TABLE_NAME: !Ref SessionTable
         LLM_MODEL: anthropic.claude-3-haiku-20240307-v1:0
+        KNOWLEDGE_BUCKET: !Ref KnowledgeBucket
 
 Resources:
+
+  # ── S3 bucket for ChromaDB vector store ─────────────────────────────────────
+  KnowledgeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "study-assistant-knowledge-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
   # ── DynamoDB table for session history ──────────────────────────────────────
   SessionTable:
@@ -45,8 +57,8 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionTable
-        # Grants InvokeModel on Claude Haiku specifically.
-        # To allow all Bedrock models instead, change Resource to "*".
+        - S3ReadPolicy:
+            BucketName: !Ref KnowledgeBucket
         - Statement:
             - Effect: Allow
               Action:
@@ -93,3 +105,6 @@ Outputs:
   TableName:
     Description: DynamoDB table name
     Value: !Ref SessionTable
+  KnowledgeBucketName:
+    Description: S3 bucket for the vector knowledge base
+    Value: !Ref KnowledgeBucket

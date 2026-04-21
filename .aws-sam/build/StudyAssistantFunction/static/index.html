@@ -435,20 +435,21 @@
   <!-- Sidebar -->
   <aside class="sidebar">
     <div>
-      <h2>Topics</h2>
-      <button class="topic-chip" onclick="sendMessage('Tell me about transformers')">Transformers</button>
-      <button class="topic-chip" onclick="sendMessage('Explain large language models')">LLMs</button>
-      <button class="topic-chip" onclick="sendMessage('What is RAG?')">RAG</button>
-      <button class="topic-chip" onclick="sendMessage('How do AI agents work?')">Agents</button>
-      <button class="topic-chip" onclick="sendMessage('Explain context management in LLMs')">Context Mgmt</button>
-      <button class="topic-chip" onclick="sendMessage('What are structured outputs?')">Structured Outputs</button>
-      <button class="topic-chip" onclick="sendMessage('How does function calling work?')">Function Calling</button>
+      <h2>From the Papers</h2>
+      <button class="topic-chip" onclick="sendMessage('Explain scaled dot-product attention')">Attention Mechanism</button>
+      <button class="topic-chip" onclick="sendMessage('How does multi-head attention work?')">Multi-Head Attention</button>
+      <button class="topic-chip" onclick="sendMessage('What are positional encodings and why are they needed?')">Positional Encoding</button>
+      <button class="topic-chip" onclick="sendMessage('Explain the encoder-decoder architecture in transformers')">Encoder-Decoder</button>
+      <button class="topic-chip" onclick="sendMessage('How was the original transformer trained?')">Training Details</button>
+      <button class="topic-chip" onclick="sendMessage('Explain BERT architecture and pre-training')">BERT</button>
+      <button class="topic-chip" onclick="sendMessage('How does GPT work as a decoder-only transformer?')">GPT</button>
+      <button class="topic-chip" onclick="sendMessage('What are the formal algorithms for transformers?')">Formal Algorithms</button>
     </div>
     <div class="quick-actions">
       <h2>Quick Actions</h2>
       <button class="action-btn" onclick="sendMessage('What topics can you help me with?')">📋 List all topics</button>
       <button class="action-btn" onclick="promptQuiz()">🧪 Start a quiz</button>
-      <button class="action-btn" onclick="sendMessage('Compare RAG and agents')">⚖️ Compare concepts</button>
+      <button class="action-btn" onclick="sendMessage('Compare BERT and GPT architectures')">⚖️ Compare BERT vs GPT</button>
     </div>
   </aside>
 
@@ -459,14 +460,14 @@
         <h2>Hello! I'm your Study Assistant 👋</h2>
         <p>I can explain AI/ML concepts, quiz you on topics, and compare ideas. I use tools to retrieve accurate facts — ask me anything!</p>
         <div class="suggestion-grid">
-          <button class="suggestion" onclick="sendMessage('Explain transformers to me')">
-            <span class="icon">🤖</span>What are transformers?
+          <button class="suggestion" onclick="sendMessage('Explain scaled dot-product attention')">
+            <span class="icon">🤖</span>How does attention work?
           </button>
-          <button class="suggestion" onclick="sendMessage('Quiz me on RAG with 4 questions')">
-            <span class="icon">🧪</span>Quiz me on RAG
+          <button class="suggestion" onclick="sendMessage('Quiz me on transformer architecture with 4 questions')">
+            <span class="icon">🧪</span>Quiz me on transformers
           </button>
-          <button class="suggestion" onclick="sendMessage('Compare LLMs and RAG')">
-            <span class="icon">⚖️</span>Compare LLMs vs RAG
+          <button class="suggestion" onclick="sendMessage('Compare BERT and GPT architectures')">
+            <span class="icon">⚖️</span>BERT vs GPT
           </button>
           <button class="suggestion" onclick="sendMessage('What topics are available?')">
             <span class="icon">📚</span>What can I study?
@@ -514,6 +515,10 @@
       <div class="metric-label">Errors</div>
       <div class="metric-value" id="m-errors">—</div>
     </div>
+    <div class="metric-card">
+      <div class="metric-label">Last Tool Called</div>
+      <div class="metric-value" id="m-last-tool" style="font-size:0.85rem;">—</div>
+    </div>
     <div style="margin-top:12px;">
       <h2>Tool Breakdown</h2>
       <div id="m-tool-breakdown" style="font-size:0.78rem;color:var(--text-muted);line-height:1.8;"></div>
@@ -547,7 +552,7 @@
   }
 
   function promptQuiz() {
-    const topics = ['transformers', 'LLMs', 'RAG', 'agents', 'context management'];
+    const topics = ['attention mechanism', 'transformer architecture', 'BERT', 'GPT', 'positional encoding', 'training transformers'];
     const t = topics[Math.floor(Math.random() * topics.length)];
     sendMessage(`Quiz me on ${t} with 4 questions`);
   }
@@ -557,15 +562,16 @@
       await fetch(`${API_BASE}/session/${sessionId}`, { method: 'DELETE' }).catch(() => {});
     }
     sessionId = null;
+    refreshMetrics();
     const msgs = document.getElementById('messages');
     msgs.innerHTML = `
       <div class="welcome" id="welcome">
         <h2>Hello! I'm your Study Assistant 👋</h2>
         <p>I can explain AI/ML concepts, quiz you on topics, and compare ideas. I use tools to retrieve accurate facts — ask me anything!</p>
         <div class="suggestion-grid">
-          <button class="suggestion" onclick="sendMessage('Explain transformers to me')"><span class="icon">🤖</span>What are transformers?</button>
-          <button class="suggestion" onclick="sendMessage('Quiz me on RAG with 4 questions')"><span class="icon">🧪</span>Quiz me on RAG</button>
-          <button class="suggestion" onclick="sendMessage('Compare LLMs and RAG')"><span class="icon">⚖️</span>Compare LLMs vs RAG</button>
+          <button class="suggestion" onclick="sendMessage('Explain scaled dot-product attention')"><span class="icon">🤖</span>How does attention work?</button>
+          <button class="suggestion" onclick="sendMessage('Quiz me on transformer architecture with 4 questions')"><span class="icon">🧪</span>Quiz me on transformers</button>
+          <button class="suggestion" onclick="sendMessage('Compare BERT and GPT architectures')"><span class="icon">⚖️</span>BERT vs GPT</button>
           <button class="suggestion" onclick="sendMessage('What topics are available?')"><span class="icon">📚</span>What can I study?</button>
         </div>
       </div>`;
@@ -718,6 +724,7 @@
         m.avg_response_latency_ms ? m.avg_response_latency_ms + 'ms' : '—';
       document.getElementById('m-tools').textContent = m.total_tool_calls ?? '—';
       document.getElementById('m-errors').textContent = m.errors ?? '—';
+      document.getElementById('m-last-tool').textContent = m.last_tool_called ?? '—';
 
       const breakdown = m.tool_call_breakdown || {};
       const bd = document.getElementById('m-tool-breakdown');

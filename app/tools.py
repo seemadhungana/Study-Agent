@@ -1,207 +1,183 @@
 """
 Tool implementations for the Study Assistant Agent.
-Each function here maps to a tool the LLM can call.
+
+Knowledge base is grounded in two academic papers:
+  - "Attention Is All You Need" (Vaswani et al., 2017)
+  - "Formal Algorithms for Transformers" (Phuong & Hutter, DeepMind)
+
+Retrieval uses ChromaDB + Bedrock Titan embeddings stored in S3.
 """
 
 import json
+import os
 import random
-from datetime import datetime
 
-
-TOPIC_KNOWLEDGE_BASE = {
-    "transformers": {
-        "summary": "Transformers are a neural network architecture based entirely on attention mechanisms, introduced in 'Attention Is All You Need' (Vaswani et al., 2017). They replaced RNNs for most NLP tasks by enabling parallel processing of sequences.",
-        "key_concepts": ["self-attention", "multi-head attention", "positional encoding", "encoder-decoder", "feed-forward layers"],
-        "facts": [
-            "Transformers use scaled dot-product attention: Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) * V",
-            "BERT uses only the encoder stack; GPT uses only the decoder stack.",
-            "Positional encodings inject sequence order since attention is order-agnostic.",
-            "Multi-head attention runs several attention heads in parallel to capture different relationships.",
-        ],
-    },
-    "llm": {
-        "summary": "Large Language Models (LLMs) are transformer-based models trained on massive text corpora to predict the next token. They exhibit emergent capabilities like reasoning, code generation, and instruction following.",
-        "key_concepts": ["pre-training", "fine-tuning", "RLHF", "in-context learning", "prompt engineering", "temperature", "top-p sampling"],
-        "facts": [
-            "GPT-3 has 175 billion parameters.",
-            "In-context learning lets LLMs solve tasks from a few examples in the prompt without weight updates.",
-            "RLHF (Reinforcement Learning from Human Feedback) aligns models to human preferences.",
-            "Temperature controls randomness: 0 = greedy decoding, >1 = more random.",
-        ],
-    },
-    "rag": {
-        "summary": "Retrieval-Augmented Generation (RAG) combines a retrieval system (usually vector search) with an LLM. The retriever fetches relevant documents; the LLM generates an answer grounded in those documents.",
-        "key_concepts": ["vector embeddings", "semantic search", "chunking", "re-ranking", "grounding", "hallucination reduction"],
-        "facts": [
-            "RAG reduces hallucinations by grounding the LLM in retrieved evidence.",
-            "Documents are chunked and embedded; queries are embedded and matched by cosine similarity.",
-            "Re-rankers (e.g., cross-encoders) improve precision after initial retrieval.",
-            "Hybrid search combines dense (embedding) and sparse (BM25) retrieval.",
-        ],
-    },
-    "agents": {
-        "summary": "An AI agent is an LLM that can decide what to do next—calling tools, routing to sub-systems, or producing a final answer. The LLM acts as the 'brain' that plans and executes steps.",
-        "key_concepts": ["tool use", "function calling", "ReAct", "chain-of-thought", "multi-agent", "supervisor pattern"],
-        "facts": [
-            "ReAct (Reason + Act) interleaves reasoning traces with tool calls.",
-            "Function calling lets LLMs output structured JSON specifying which tool to invoke and with what arguments.",
-            "Multi-agent systems use a supervisor LLM to route tasks to specialized sub-agents.",
-            "Tool selection is where the agentic decision happens: the LLM chooses which (if any) tool to call.",
-        ],
-    },
-    "context management": {
-        "summary": "Context management deals with what information the LLM receives in its context window. Strategies include summarization, sliding windows, memory stores, and dynamic retrieval to stay within token limits.",
-        "key_concepts": ["context window", "token limit", "summarization", "sliding window", "external memory", "KV cache"],
-        "facts": [
-            "Modern LLMs have context windows ranging from 8K to 1M+ tokens.",
-            "Lost-in-the-middle effect: LLMs attend better to information at the beginning and end of long contexts.",
-            "Summarization compresses past turns to save tokens for new content.",
-            "KV-cache stores computed attention keys/values so repeated prefixes need not be recomputed.",
-        ],
-    },
-    "structured outputs": {
-        "summary": "Structured outputs constrain LLM responses to a defined schema (JSON, XML, etc.), making them reliable for downstream processing. Techniques include JSON mode, grammar-constrained decoding, and function calling.",
-        "key_concepts": ["JSON mode", "function calling", "Pydantic", "grammar-constrained decoding", "schema validation"],
-        "facts": [
-            "OpenAI's JSON mode guarantees the response is valid JSON.",
-            "Pydantic models can be auto-converted to JSON schemas for structured output validation.",
-            "Grammar-constrained decoding (e.g., llama.cpp GBNF) restricts the token distribution at each step.",
-            "Structured outputs eliminate the need for regex-based output parsing.",
-        ],
-    },
-    "function calling": {
-        "summary": "Function calling (tool use) is a model capability where the LLM outputs a structured call to a predefined function instead of free text. The caller executes the function and feeds results back to the model.",
-        "key_concepts": ["tool schema", "tool result", "parallel tool calls", "tool choice", "streaming tool calls"],
-        "facts": [
-            "Tool schemas are defined as JSON Schema objects describing name, description, and parameters.",
-            "The LLM does not execute functions—it just outputs the call; the application runs it.",
-            "Parallel tool calls allow the model to invoke multiple tools in one turn.",
-            "tool_choice='required' forces the model to always call a tool.",
-        ],
-    },
-}
-
-QUIZ_QUESTIONS = {
+# Fallback quiz bank (always available; supplements retrieved content)
+QUIZ_BANK = {
+    "attention": [
+        {"q": "What is the scaled dot-product attention formula?", "a": "Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) * V"},
+        {"q": "Why do we scale by sqrt(d_k) in attention?", "a": "To prevent dot products from growing large in magnitude and pushing softmax into regions of small gradients"},
+        {"q": "What is multi-head attention?", "a": "Running h parallel attention heads on projected Q, K, V then concatenating and projecting the outputs"},
+        {"q": "What does self-attention compute?", "a": "A weighted average of values where weights come from the compatibility of each query with all keys in the same sequence"},
+        {"q": "What is the complexity of self-attention vs recurrence?", "a": "Self-attention is O(n^2 * d) per layer; recurrence is O(n * d^2). Attention is faster for long sequences."},
+    ],
     "transformers": [
-        {"q": "What is the core mechanism in transformers that replaces recurrence?", "a": "Self-attention (scaled dot-product attention)"},
-        {"q": "What does 'multi-head' mean in multi-head attention?", "a": "Multiple attention heads run in parallel, each learning different relationships"},
-        {"q": "Why are positional encodings needed in transformers?", "a": "Because attention is order-agnostic; positional encodings inject sequence position information"},
-        {"q": "Which transformer variant uses only the encoder stack?", "a": "BERT"},
-        {"q": "What is the formula for scaled dot-product attention?", "a": "softmax(QK^T / sqrt(d_k)) * V"},
+        {"q": "What architecture did the transformer replace for sequence-to-sequence tasks?", "a": "Recurrent Neural Networks (RNNs) and LSTMs with encoder-decoder structure"},
+        {"q": "Why are positional encodings needed?", "a": "Attention has no inherent notion of order; positional encodings inject position information using sine/cosine functions"},
+        {"q": "What is the role of the encoder in a transformer?", "a": "Maps input token sequence to continuous representations (keys and values) used by the decoder"},
+        {"q": "What is the role of the decoder in a transformer?", "a": "Auto-regressively generates the output sequence, attending to encoder output and previous decoder outputs"},
+        {"q": "What is residual connection + layer norm used for in transformers?", "a": "Stabilizes training by adding the input of each sub-layer to its output before normalization"},
+        {"q": "How many attention heads and model dimension did the original transformer use?", "a": "8 heads, d_model=512 in the base model; 16 heads, d_model=1024 in the large model"},
     ],
-    "llm": [
-        {"q": "What does RLHF stand for and why is it used?", "a": "Reinforcement Learning from Human Feedback — used to align LLMs with human preferences"},
-        {"q": "What is in-context learning?", "a": "Solving tasks from examples in the prompt without updating model weights"},
-        {"q": "What effect does temperature=0 have on generation?", "a": "Greedy decoding — always picks the highest probability token"},
-        {"q": "Approximately how many parameters does GPT-3 have?", "a": "175 billion"},
+    "training": [
+        {"q": "What optimizer was used to train the original transformer?", "a": "Adam with a custom learning rate schedule: warmup then inverse square root decay"},
+        {"q": "What regularization techniques did the original transformer use?", "a": "Residual dropout (P=0.1), label smoothing (epsilon=0.1)"},
+        {"q": "What is label smoothing and why is it used?", "a": "Distributing a small probability mass to non-target tokens; improves generalization even though it hurts perplexity"},
+        {"q": "What task was the original transformer evaluated on?", "a": "Machine translation: WMT 2014 English-German and English-French"},
+        {"q": "What BLEU score did the big transformer achieve on EN-DE?", "a": "28.4 BLEU, outperforming all previous models including ensembles"},
     ],
-    "rag": [
-        {"q": "What problem does RAG primarily address?", "a": "Hallucination — it grounds the LLM in retrieved evidence"},
-        {"q": "What similarity metric is most common in vector search?", "a": "Cosine similarity"},
-        {"q": "What is chunking in RAG?", "a": "Splitting documents into smaller pieces before embedding them"},
-        {"q": "What does a re-ranker do in a RAG pipeline?", "a": "Re-orders retrieved documents by relevance to improve precision"},
+    "bert": [
+        {"q": "What is BERT's architecture?", "a": "Encoder-only transformer, trained with masked language modeling (MLM) and next sentence prediction (NSP)"},
+        {"q": "What is masked language modeling?", "a": "Randomly masking 15% of input tokens and training the model to predict them — enables bidirectional context"},
+        {"q": "How does BERT differ from GPT architecturally?", "a": "BERT uses encoder-only (bidirectional); GPT uses decoder-only (causal/unidirectional)"},
     ],
-    "agents": [
-        {"q": "What does ReAct stand for?", "a": "Reason + Act — interleaving reasoning with tool calls"},
-        {"q": "What makes a system 'agentic'?", "a": "The LLM makes decisions about what to do next, including which tools to call"},
-        {"q": "In function calling, who executes the function?", "a": "The application/caller — the LLM only outputs the call"},
-        {"q": "What is the supervisor pattern in multi-agent systems?", "a": "A supervisor LLM routes tasks to specialized sub-agents"},
-    ],
-    "context management": [
-        {"q": "What is the lost-in-the-middle effect?", "a": "LLMs attend better to info at the beginning and end of long contexts, missing middle content"},
-        {"q": "What is a KV cache?", "a": "Cached attention keys/values so repeated prefixes don't need recomputation"},
-        {"q": "Name two strategies for managing long conversations within token limits.", "a": "Summarization and sliding window (also: external memory, RAG)"},
+    "gpt": [
+        {"q": "What is causal (autoregressive) language modeling?", "a": "Predicting the next token given all previous tokens; used in GPT-style decoder-only models"},
+        {"q": "What masking does GPT use in attention?", "a": "Causal mask: each position can only attend to itself and previous positions, not future ones"},
+        {"q": "What is the key difference between GPT pre-training and fine-tuning?", "a": "Pre-training is unsupervised next-token prediction on large corpus; fine-tuning adapts to a supervised task"},
     ],
 }
+
+AVAILABLE_TOPICS = [
+    "attention mechanism",
+    "transformer architecture",
+    "multi-head attention",
+    "positional encoding",
+    "encoder-decoder",
+    "self-attention",
+    "BERT",
+    "GPT",
+    "training transformers",
+    "formal algorithms",
+    "scaled dot-product attention",
+]
+
+_vector_store_available = None
+
+
+def _check_vector_store():
+    global _vector_store_available
+    if _vector_store_available is not None:
+        return _vector_store_available
+    bucket = os.environ.get("KNOWLEDGE_BUCKET", "")
+    _vector_store_available = bool(bucket)
+    return _vector_store_available
+
+
+def _rag_search(query: str, n: int = 5) -> list[dict]:
+    try:
+        from vector_store import search
+        return search(query, n_results=n)
+    except Exception as e:
+        return [{"text": f"Vector store unavailable: {e}", "source": "", "title": "", "distance": 1.0}]
 
 
 def lookup_topic(topic: str) -> dict:
-    """Retrieve factual information about a study topic from the knowledge base."""
-    topic_lower = topic.lower().strip()
-    matched_key = None
-    for key in TOPIC_KNOWLEDGE_BASE:
-        if key in topic_lower or topic_lower in key:
-            matched_key = key
-            break
-
-    if matched_key is None:
+    """Retrieve information about a topic from the PDF knowledge base via semantic search."""
+    if not _check_vector_store():
         return {
             "found": False,
             "topic": topic,
-            "message": f"No knowledge base entry found for '{topic}'. Available topics: {', '.join(TOPIC_KNOWLEDGE_BASE.keys())}",
+            "message": "Knowledge base not yet initialized. Run ingest.py and set KNOWLEDGE_BUCKET.",
         }
 
-    data = TOPIC_KNOWLEDGE_BASE[matched_key]
+    hits = _rag_search(topic, n=5)
+    if not hits or hits[0]["distance"] > 0.8:
+        return {
+            "found": False,
+            "topic": topic,
+            "message": f"No relevant content found for '{topic}' in the knowledge base.",
+            "available_topics": AVAILABLE_TOPICS,
+        }
+
+    sources = list({h["title"] for h in hits if h["title"]})
+    passages = [h["text"] for h in hits]
+
     return {
         "found": True,
-        "topic": matched_key,
-        "summary": data["summary"],
-        "key_concepts": data["key_concepts"],
-        "facts": data["facts"],
+        "topic": topic,
+        "sources": sources,
+        "passages": passages,
+        "note": "Content retrieved from: Attention Is All You Need (Vaswani et al.) and Formal Algorithms for Transformers (Phuong & Hutter)",
     }
 
 
 def generate_quiz(topic: str, num_questions: int = 3) -> dict:
-    """Generate a short quiz on a given topic."""
+    """Generate quiz questions on a topic, drawing from the paper-based quiz bank."""
     topic_lower = topic.lower().strip()
+
     matched_key = None
-    for key in QUIZ_QUESTIONS:
-        if key in topic_lower or topic_lower in key:
+    for key in QUIZ_BANK:
+        if key in topic_lower or topic_lower in key or any(w in topic_lower for w in key.split()):
             matched_key = key
             break
 
     if matched_key is None:
-        available = ", ".join(QUIZ_QUESTIONS.keys())
+        all_questions = [q for questions in QUIZ_BANK.values() for q in questions]
+        pool = random.sample(all_questions, min(num_questions, len(all_questions)))
         return {
-            "found": False,
+            "found": True,
             "topic": topic,
-            "message": f"No quiz available for '{topic}'. Available topics: {available}",
+            "note": f"No exact quiz for '{topic}', showing general transformer questions.",
+            "num_questions": len(pool),
+            "questions": [{"number": i+1, "question": q["q"], "answer": q["a"]} for i, q in enumerate(pool)],
         }
 
-    pool = QUIZ_QUESTIONS[matched_key]
+    pool = QUIZ_BANK[matched_key]
     selected = random.sample(pool, min(num_questions, len(pool)))
     return {
         "found": True,
         "topic": matched_key,
+        "source": "Based on: Attention Is All You Need & Formal Algorithms for Transformers",
         "num_questions": len(selected),
-        "questions": [{"number": i + 1, "question": q["q"], "answer": q["a"]} for i, q in enumerate(selected)],
+        "questions": [{"number": i+1, "question": q["q"], "answer": q["a"]} for i, q in enumerate(selected)],
     }
 
 
 def list_topics() -> dict:
-    """List all topics available in the knowledge base."""
+    """List all topics covered in the knowledge base papers."""
     return {
-        "available_topics": list(TOPIC_KNOWLEDGE_BASE.keys()),
-        "count": len(TOPIC_KNOWLEDGE_BASE),
-        "description": "These are the topics I can look up, quiz you on, or explain in depth.",
+        "available_topics": AVAILABLE_TOPICS,
+        "count": len(AVAILABLE_TOPICS),
+        "sources": [
+            "Attention Is All You Need (Vaswani et al., 2017)",
+            "Formal Algorithms for Transformers (Phuong & Hutter, DeepMind)",
+        ],
+        "description": "These topics are grounded in the two source papers. Ask me anything about transformers, attention, BERT, GPT, training, or formal algorithms.",
     }
 
 
 def compare_topics(topic_a: str, topic_b: str) -> dict:
-    """Compare two topics side-by-side based on knowledge base entries."""
+    """Compare two topics by retrieving relevant passages for each."""
     result_a = lookup_topic(topic_a)
     result_b = lookup_topic(topic_b)
 
-    if not result_a["found"] or not result_b["found"]:
-        missing = []
-        if not result_a["found"]:
-            missing.append(topic_a)
-        if not result_b["found"]:
-            missing.append(topic_b)
-        return {"found": False, "message": f"Could not find topics: {', '.join(missing)}"}
+    if not result_a["found"] and not result_b["found"]:
+        return {"found": False, "message": f"Could not find content for '{topic_a}' or '{topic_b}'."}
 
     return {
         "found": True,
         "topic_a": {
-            "name": result_a["topic"],
-            "summary": result_a["summary"],
-            "key_concepts": result_a["key_concepts"],
+            "name": topic_a,
+            "passages": result_a.get("passages", [])[:2],
+            "sources": result_a.get("sources", []),
         },
         "topic_b": {
-            "name": result_b["topic"],
-            "summary": result_b["summary"],
-            "key_concepts": result_b["key_concepts"],
+            "name": topic_b,
+            "passages": result_b.get("passages", [])[:2],
+            "sources": result_b.get("sources", []),
         },
+        "note": "Content from: Attention Is All You Need & Formal Algorithms for Transformers",
     }
 
 
@@ -211,16 +187,16 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "lookup_topic",
             "description": (
-                "Look up factual information about a specific study topic from the knowledge base. "
-                "Use this when the user asks about a concept, wants a summary, or needs facts about a topic. "
-                "Available topics include: transformers, llm, rag, agents, context management, structured outputs, function calling."
+                "Look up information about a transformer/LLM topic from the academic paper knowledge base. "
+                "Uses semantic search over 'Attention Is All You Need' and 'Formal Algorithms for Transformers'. "
+                "Use this for any question about attention, transformers, BERT, GPT, positional encoding, training, etc."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "topic": {
                         "type": "string",
-                        "description": "The study topic to look up (e.g. 'transformers', 'RAG', 'agents').",
+                        "description": "The topic or question to look up (e.g. 'multi-head attention', 'positional encoding', 'BERT training').",
                     }
                 },
                 "required": ["topic"],
@@ -231,22 +207,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "generate_quiz",
-            "description": (
-                "Generate a short quiz with questions and answers on a given topic. "
-                "Use this when the user wants to be quizzed, tested, or practice questions."
-            ),
+            "description": "Generate quiz questions from the paper knowledge base to test understanding.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "The topic to quiz on.",
-                    },
-                    "num_questions": {
-                        "type": "integer",
-                        "description": "How many questions to generate (default 3, max 5).",
-                        "default": 3,
-                    },
+                    "topic": {"type": "string", "description": "Topic to quiz on."},
+                    "num_questions": {"type": "integer", "description": "Number of questions (default 3).", "default": 3},
                 },
                 "required": ["topic"],
             },
@@ -256,7 +222,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "list_topics",
-            "description": "List all topics available in the knowledge base. Use when the user asks what topics are available or what they can study.",
+            "description": "List all topics covered in the knowledge base papers.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -264,12 +230,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "compare_topics",
-            "description": "Compare two topics side-by-side. Use when the user wants to understand the difference or relationship between two concepts.",
+            "description": "Compare two concepts side-by-side using retrieved passages from the papers.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "topic_a": {"type": "string", "description": "First topic."},
-                    "topic_b": {"type": "string", "description": "Second topic."},
+                    "topic_a": {"type": "string", "description": "First concept."},
+                    "topic_b": {"type": "string", "description": "Second concept."},
                 },
                 "required": ["topic_a", "topic_b"],
             },

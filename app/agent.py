@@ -90,6 +90,7 @@ def run_agent(
     messages.append({"role": "user", "content": [{"text": user_message}]})
 
     tool_calls_made = 0
+    successful_tool_calls = 0
 
     for _ in range(max_iterations):
         response = bedrock.converse(
@@ -112,7 +113,7 @@ def run_agent(
             for block in output_message.get("content", []):
                 if "text" in block:
                     text += block["text"]
-            return text, tool_calls_made
+            return text, tool_calls_made, successful_tool_calls
 
         # "tool_use" means the model wants to call one or more tools.
         if stop_reason == "tool_use":
@@ -130,12 +131,14 @@ def run_agent(
 
                 try:
                     parsed = json.loads(result_str)
-                    success = parsed.get("found", True) and "error" not in parsed
+                    success = "error" not in parsed and parsed.get("found", True) is not False
                 except Exception:
                     success = False
 
                 log_tool_call(trace_id, tool_name, arguments, result_str, success)
                 tool_calls_made += 1
+                if success:
+                    successful_tool_calls += 1
 
                 tool_results.append({
                     "toolUseId": tool_use_id,
@@ -154,7 +157,7 @@ def run_agent(
         for block in output_message.get("content", []):
             if "text" in block:
                 text += block["text"]
-        return text, tool_calls_made
+        return text, tool_calls_made, successful_tool_calls
 
     # Fallback: hit max_iterations, ask for a plain final answer.
     response = bedrock.converse(
@@ -166,4 +169,4 @@ def run_agent(
     for block in response["output"]["message"].get("content", []):
         if "text" in block:
             text += block["text"]
-    return text, tool_calls_made
+    return text, tool_calls_made, successful_tool_calls

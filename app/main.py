@@ -74,7 +74,7 @@ async def chat(req: ChatRequest):
         # Load history from DynamoDB (persistent across Lambda invocations)
         history = get_history(session_id)
 
-        response_text, tool_calls_made = run_agent(
+        response_text, tool_calls_made, successful_tools = run_agent(
             user_message=user_message,
             conversation_history=history,
             trace_id=trace_id,
@@ -91,9 +91,10 @@ async def chat(req: ChatRequest):
         error_msg = str(e)
         response_text = "I encountered an error. Please try again."
         tool_calls_made = 0
+        successful_tools = 0
 
     latency_ms = (time.perf_counter() - start) * 1000
-    log_response_complete(trace_id, session_id, response_text, latency_ms, tool_calls_made, error_msg)
+    log_response_complete(trace_id, session_id, response_text, latency_ms, tool_calls_made, successful_tools, error_msg)
 
     if error_msg:
         raise HTTPException(status_code=500, detail=error_msg)
