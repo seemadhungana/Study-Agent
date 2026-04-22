@@ -2,22 +2,15 @@
 
 **Course:** Context Augmented AI (Spring 2026)
 **Student:** Seema Dhungana
-**Date:** April 2026
+**Date:** April 21 2026
 
 ---
 
 ## a. Problem and Use Case
 
-**Problem:** Students studying transformer architectures and large language models need an on-demand tutor grounded in actual academic papers rather than generic internet knowledge. Traditional chatbots hallucinate details; search engines require sifting through dense PDFs; flashcard apps don't explain.
+Students studying transformer architectures and large language models often struggle to find reliable, on-demand explanations grounded in actual academic papers. Traditional chatbots tend to hallucinate details, search engines require manually sifting through dense PDFs, and flashcard apps don't explain concepts. I built a Study Assistant Agent to fill this gap. The tutor answers questions, generates quizzes, and compares concepts by retrieving evidence directly from foundational research papers rather than relying on generic internet knowledge.
 
-**User:** A student in an AI/ML course who wants to learn, review, or self-test on concepts from foundational transformer research papers.
-
-**What the application does:**
-- Answers questions about transformer concepts by retrieving relevant passages directly from two academic papers via semantic search
-- Generates quizzes drawn from paper-based question banks for self-testing
-- Compares two concepts side-by-side using retrieved evidence
-- Maintains conversation history within a session so follow-up questions work naturally
-- Falls back gracefully to the LLM's own knowledge for out-of-scope topics, clearly acknowledging the limitation
+The primary user is a student in an AI/ML course who wants to learn, review, or self-test on transformer concepts from academic sources. The application answers questions about transformer topics by semantically searching two academic papers, generates paper-grounded quizzes for self-testing, compares two concepts side-by-side using retrieved evidence, and maintains conversation history within a session so follow-up questions work naturally. When a topic falls outside the knowledge base, the agent gracefully falls back to the model's own knowledge while acknowledging the limitation.
 
 ---
 
@@ -75,52 +68,31 @@ Response JSON → Browser
 
 ### Agentic Behavior Implementation
 
-Each turn, `agent.py` calls the Bedrock Converse API with `toolConfig` containing 4 tool definitions. The model returns either:
-1. `stopReason: "tool_use"` → the app dispatches each tool call, appends results as a `user` turn, and loops
-2. `stopReason: "end_turn"` → the loop exits and returns the text response
-
-The loop runs up to `max_iterations=5`. The LLM — not the application — decides whether to call a tool, which tool, and with what arguments on every turn.
+Each turn, `agent.py` calls the Bedrock Converse API with a `toolConfig` containing four tool definitions. The model returns either a `stopReason: "tool_use"`, at which point the app dispatches each tool call, appends the results as a new user turn, and loops, or a `stopReason: "end_turn"`, which exits the loop and returns the text response. The loop runs up to `max_iterations=5`. Critically, the LLM, not the application, decides on every turn whether to call a tool, which tool to call, and what arguments to pass.
 
 ---
 
 ## c. Why the System is Agentic
 
-**Decisions the LLM makes each turn:**
-- Whether to call any tool at all (greetings → direct response; topic questions → `lookup_topic`)
-- Which specific tool is appropriate ("quiz me" → `generate_quiz`; "what's available" → `list_topics`)
-- What arguments to pass (extracts topic names from natural language)
-- Whether to chain calls (a compare request may invoke `lookup_topic` twice before synthesizing)
+The system is meaningfully agentic because the LLM makes real routing decisions on every turn rather than following a fixed pipeline. Depending on the user's phrasing and conversation context, the same input can produce different tool paths: a greeting gets a direct response, a topic question triggers `lookup_topic`, "quiz me" triggers `generate_quiz`, and "what's available" triggers `list_topics`. The model also decides what arguments to pass by extracting topic names from natural language, and can chain calls, a compare request may invoke `lookup_topic` twice before synthesizing an answer.
 
-**This is meaningfully agentic because:**
-- The same user input can result in different tool paths depending on phrasing and context
-- The model can choose *not* to call a tool when the topic is out of scope
-- The workflow is not fixed — the LLM dynamically determines the sequence of operations
-- For out-of-scope queries (e.g., "What is LoRA?"), the LLM correctly skips tool use and answers directly, acknowledging the knowledge base limitation
-
-**This is NOT a fixed pipeline** — there is no hardcoded "always call lookup_topic first." The routing decision belongs entirely to the model.
+Equally important, the model knows when *not* to call a tool. For out-of-scope queries like "What is LoRA?", the LLM correctly skips tool use and answers directly from its training data, acknowledging the knowledge base limitation. There is no hardcoded "always call `lookup_topic` first" logic anywhere in the application, the routing decision belongs entirely to the model.
 
 ---
 
 ## d. Technical Choices and Rationale
 
-| Choice | Rationale |
-|---|---|
-| **Amazon Bedrock (Claude 3 Haiku)** | Native AWS integration — no separate API key; IAM role-based auth; strong tool-use support; cost-effective at ~$0.25/1M input tokens |
-| **Bedrock Converse API** | Unified interface across Claude models; native `tool_use` / `end_turn` stop reasons make agentic loops clean |
-| **Bedrock Titan Embeddings v2** | AWS-native embedding model; no external API; used for both ingestion and query embedding |
-| **Cosine similarity + numpy** | Pure Python vector search — no native binaries, fits within Lambda's 250MB unzipped limit (ChromaDB was too large) |
-| **S3 for embedding storage** | Persistent, cheap (~$0.01/month for 38 chunks), accessible from Lambda; embeddings downloaded once per cold start |
-| **DynamoDB for sessions + metrics** | Already provisioned; atomic `ADD` expressions make metric counters race-condition-safe across concurrent Lambda invocations |
-| **FastAPI + Mangum** | Minimal adapter to run ASGI on Lambda; same code runs locally with `uvicorn` |
-| **AWS SAM** | Infrastructure-as-code for Lambda, API Gateway, DynamoDB, S3; reproducible one-command deployment |
-| **PDF chunking (400 words, 50 overlap)** | Balances semantic coherence with embedding context limits; overlap reduces information loss at chunk boundaries |
-| **Two source papers** | "Attention Is All You Need" (Vaswani et al., 2017) and "Formal Algorithms for Transformers" (Phuong & Hutter, DeepMind) — canonical, academically rigorous sources for transformer content |
+The core model is **Amazon Bedrock with Claude 3 Haiku**, chosen for its native AWS integration (no separate API key, IAM role-based auth), strong tool-use support, and cost-effectiveness. I used the **Bedrock Converse API** specifically because its unified interface across Claude models makes the agentic loop clean: the `tool_use` and `end_turn` stop reasons map directly onto the agent's branch logic.
+
+For embeddings, I used **Bedrock Titan Embeddings v2**, an AWS-native model that requires no external API and is used consistently for both ingestion and query embedding. Vector search is implemented with **cosine similarity over numpy arrays** rather than ChromaDB, because ChromaDB's native binaries exceeded Lambda's 250MB unzipped size limit, this was a hard constraint, not a preference. The embedding index is stored as a gzipped JSON file in **S3**, downloaded once per cold start and cached in memory for warm invocations.
+
+**DynamoDB** handles both session history and persistent metrics. Atomic `ADD` expressions make metric counters race-condition-safe across concurrent Lambda invocations, which matters in serverless environments where multiple containers can run simultaneously. The web server uses **FastAPI + Mangum**, a minimal ASGI adapter that lets the same code run locally with `uvicorn` and on Lambda without modification. Infrastructure is managed via **AWS SAM**, enabling reproducible one-command deployments. PDF chunking uses **400-word chunks with 50-word overlap**, balancing semantic coherence with embedding context limits; the overlap reduces information loss at chunk boundaries. The two source papers,  "Attention Is All You Need" (Vaswani et al., 2017) and "Formal Algorithms for Transformers" (Phuong & Hutter, DeepMind), were chosen as the canonical, academically rigorous foundations for transformer content.
 
 ---
 
 ## e. Observability
 
-**Mechanism:** Two-layer observability — ephemeral JSONL traces in `/tmp` for per-request inspection, and persistent DynamoDB atomic counters for cumulative metrics.
+The system uses a two-layer observability approach: ephemeral JSONL traces written to `/tmp` for per-request inspection, and persistent DynamoDB atomic counters for cumulative metrics that survive Lambda cold starts.
 
 **What it captures:**
 
@@ -134,13 +106,7 @@ The loop runs up to `max_iterations=5`. The LLM — not the application — deci
 - `total_requests`, `total_tool_calls`, `successful_tool_calls`, `total_latency_ms`, `errors`
 - Per-tool counters: `tool_lookup_topic_calls`, `tool_generate_quiz_calls`, etc.
 
-**How it helps:**
-- `trace_id` links all events for one request end-to-end
-- `tool_call.success=false` immediately flags retrieval failures vs. successful retrievals
-- `latency_ms` per request identifies slow agentic chains (multiple tool calls compound latency)
-- DynamoDB counters persist across Lambda cold starts — metrics accumulate across all invocations
-- `/metrics` endpoint serves aggregated stats to the live frontend panel in real time
-- `/traces` endpoint returns the last N raw JSONL records for debugging
+The `trace_id` links all events for a single request end-to-end, making it possible to reconstruct exactly what the agent did for any given query. A `tool_call.success=false` flag immediately distinguishes retrieval failures from successful ones, and `latency_ms` per request helps identify slow agentic chains where multiple tool calls compound response time. The `/metrics` endpoint serves aggregated stats to the live frontend panel, and `/traces` returns the last N raw JSONL records for debugging.
 
 ---
 
@@ -148,23 +114,11 @@ The loop runs up to `max_iterations=5`. The LLM — not the application — deci
 
 ### Metric 1: Tool Call Success Rate (Quality Metric)
 
-**Definition:** `successful_tool_calls / total_tool_calls × 100`
-
-**A tool call is successful if** the result JSON contains no `"error"` key and does not have `"found": false`.
-
-**Why it matters:** If the LLM is calling tools but they return no results (topic not found, retrieval miss), success rate drops. A low rate signals that either the system prompt needs refinement, the retrieval is missing relevant chunks, or the LLM is calling tools for out-of-scope queries that shouldn't trigger tool use at all.
-
-**How tracked:** `agent.py` increments `successful_tool_calls` per successful dispatch; `log_response_complete()` writes both counts to DynamoDB atomically.
+Tool call success rate is defined as `successful_tool_calls / total_tool_calls × 100`. A tool call is considered successful if the result JSON contains no `"error"` key and does not have `"found": false`. This metric matters because if the LLM is calling tools that return no useful results, due to a topic not found in the index or a retrieval miss, success rate drops and signals a problem. A low rate points to either a system prompt that needs refinement, retrieval that is missing relevant chunks, or the LLM calling tools for out-of-scope queries that shouldn't trigger tool use at all. Successful calls are incremented in `agent.py` per dispatch, and both counts are written to DynamoDB atomically via `log_response_complete()`.
 
 ### Metric 2: Average Response Latency (Operational Metric)
 
-**Definition:** `total_latency_ms / total_requests` — wall-clock time from request receipt to response sent
-
-**Why it matters:** Each tool call adds a round-trip: one Bedrock Converse call to decide, one embedding call, one S3/numpy search, another Converse call to synthesize. Multi-tool turns compound this. If latency exceeds ~5 seconds the study experience degrades. This metric helps identify whether slow responses are from the model, the retrieval, or the agentic chain length.
-
-**Observed range:** 4,000–6,500ms per request (single tool call turns). Breakdown: ~500ms Titan embedding, ~100ms S3 download (warm), ~3,500ms Claude synthesis.
-
-**How tracked:** `time.perf_counter()` wraps each `/chat` handler; accumulated in DynamoDB via `ADD total_latency_ms`.
+Average response latency is defined as `total_latency_ms / total_requests`, measured as wall-clock time from request receipt to response sent. This metric matters because each tool call adds a round-trip (one Bedrock Converse call to decide, one Titan embedding call, one S3/numpy search, and another Converse call to synthesize) and multi-tool turns compound this. If latency exceeds ~5 seconds the study experience degrades noticeably. Observed latency ranged from 4,000–6,500ms per request for single tool call turns, with the breakdown approximately: ~500ms Titan embedding, ~100ms S3 download (warm), ~3,500ms Claude synthesis. Latency is tracked via `time.perf_counter()` wrapping each `/chat` handler and accumulated in DynamoDB via `ADD total_latency_ms`.
 
 ---
 
@@ -178,43 +132,37 @@ Evaluation was conducted across two categories: in-scope queries (topics covered
 
 | Query | Tool Called | Result | Assessment |
 |---|---|---|---|
-| "Explain scaled dot-product attention" | `lookup_topic` | Retrieved relevant attention formula passages; coherent explanation | ✅ Success |
-| "Quiz me on transformer architecture with 4 questions" | `generate_quiz` | Returned 4 paper-grounded Q&A pairs correctly | ✅ Success |
-| "Compare BERT and GPT architectures" | `compare_topics` | Retrieved passages for both; synthesized accurate contrast | ✅ Success |
+| "Explain scaled dot-product attention" | `lookup_topic` | Retrieved relevant attention formula passages; coherent explanation | Success |
+| "Quiz me on transformer architecture with 4 questions" | `generate_quiz` | Returned 4 paper-grounded Q&A pairs correctly | Success |
+| "Compare BERT and GPT architectures" | `compare_topics` | Retrieved passages for both; synthesized accurate contrast | Success |
 
 #### Stress Tests — Specific Facts from the Papers
 
 | Query | Tool Called | Result | Assessment |
 |---|---|---|---|
-| "What is the exact BLEU score the transformer achieved on English-German translation?" | `lookup_topic` | Tool called; chunks retrieved did not contain the results table. LLM stated it "couldn't confirm" the score from the knowledge base — then stated 28.4 BLEU anyway from its own training data | ⚠️ Retrieval miss + over-hedging |
-| "Explain Algorithm 1 from the Formal Algorithms paper" | None | LLM answered directly from training data without calling a tool; provided a plausible but unverified reconstruction of the algorithm | ⚠️ Tool not triggered; no grounding |
-| "What dropout rate did the original transformer use?" | `lookup_topic` | Tool called; retrieved chunks did not contain the hyperparameter. LLM hedged, said it couldn't confirm, then answered 0.1 from its own knowledge | ⚠️ Retrieval miss + over-hedging |
+| "What is the exact BLEU score the transformer achieved on English-German translation?" | `lookup_topic` | Tool called; chunks retrieved did not contain the results table. LLM stated it "couldn't confirm" the score from the knowledge base, then stated 28.4 BLEU anyway from its own training data | Retrieval miss + over-hedging |
+| "Explain Algorithm 1 from the Formal Algorithms paper" | None | LLM answered directly from training data without calling a tool; provided a plausible but unverified reconstruction of the algorithm | Tool not triggered; no grounding |
+| "What dropout rate did the original transformer use?" | `lookup_topic` | Tool called; retrieved chunks did not contain the hyperparameter. LLM hedged, said it couldn't confirm, then answered 0.1 from its own knowledge | Retrieval miss + over-hedging |
 
 #### Out-of-Scope Queries (Expected: no tool call, graceful fallback)
 
 | Query | Tool Called | Result | Assessment |
 |---|---|---|---|
-| "What is RAG and how does it work?" | None | LLM answered from training data, noted the topic wasn't in the knowledge base | ✅ Correct fallback |
-| "How do I fine-tune a model with LoRA?" | None | LLM answered directly, acknowledged knowledge base limitation | ✅ Correct fallback |
-| "What is the context window of Claude?" | None | LLM answered from training data without tool use | ✅ Correct fallback |
+| "What is RAG and how does it work?" | None | LLM answered from training data, noted the topic wasn't in the knowledge base | Correct fallback |
+| "How do I fine-tune a model with LoRA?" | None | LLM answered directly, acknowledged knowledge base limitation | Correct fallback |
+| "What is the context window of Claude?" | None | LLM answered from training data without tool use | Correct fallback |
 
 ### Successes
 
-- Tool selection is accurate for clearly in-scope, natural-language requests
-- Out-of-scope queries are handled gracefully — the LLM does not force tool calls where none are appropriate and acknowledges the knowledge base boundary to the user
-- Conversation history is preserved across turns; follow-up questions ("give me more detail on that") work correctly
-- Metrics accumulate persistently across Lambda cold starts via DynamoDB
+The system handled clearly in-scope, natural-language requests well, tool selection was accurate and the retrieved content grounded the responses appropriately. Out-of-scope queries were handled gracefully: the LLM did not force tool calls where none were appropriate and correctly acknowledged the knowledge base boundary. Conversation history was preserved across turns, so follow-up questions like "give me more detail on that" worked correctly. Metrics also accumulated persistently across Lambda cold starts via DynamoDB, as expected.
 
 ### Failure Cases and Root Causes
 
-**1. Retrieval misses on specific numeric facts**
-Specific numbers (BLEU scores, dropout rates, layer counts) appear in dense results tables or brief clauses within longer paragraphs. At 400-word chunk granularity, these facts are typically embedded in a chunk dominated by surrounding context, causing the embedding to rank other chunks higher. The specific fact is not in the top-5 results.
+The most significant failure was **retrieval misses on specific numeric facts**. Numbers like BLEU scores, dropout rates, and layer counts tend to appear in dense results tables or brief clauses within longer paragraphs. At 400-word chunk granularity, these facts are typically embedded inside chunks dominated by surrounding context, which causes the embedding to rank other chunks higher: the specific fact simply doesn't surface in the top-5 results.
 
-**2. LLM over-hedging after retrieval miss**
-When the retrieved chunks don't contain the answer, the LLM incorrectly defers entirely to the knowledge base and says it "cannot confirm" — even when it knows the answer from its own training. This produces a confusing response where the model states it can't answer, then answers anyway. This is a system prompt design issue: the prompt should instruct the model to supplement missing retrieval results with its own knowledge more confidently.
+A related failure was **LLM over-hedging after a retrieval miss**. When retrieved chunks don't contain the answer, the model incorrectly defers entirely to the knowledge base and says it "cannot confirm," even when it actually knows the answer from its own training. This produces a confusing response where the model says it can't answer and then answers anyway. This is a system prompt design issue: the prompt should instruct the model to supplement missing retrieval results with its own knowledge more confidently.
 
-**3. Tool not triggered for highly specific algorithmic queries**
-"Explain Algorithm 1 from the Formal Algorithms paper" did not trigger a tool call. The LLM interpreted this as a general knowledge question rather than a retrieval task. A more explicit system prompt instruction — "if the user references a specific section or algorithm from either paper, always call lookup_topic" — would fix this.
+Finally, **tool not triggering for highly specific algorithmic queries** was an issue. "Explain Algorithm 1 from the Formal Algorithms paper" did not trigger a tool call because the LLM interpreted it as a general knowledge question. A more explicit system prompt instruction ("if the user references a specific section or algorithm from either paper, always call lookup_topic") would fix this.
 
 ### Tradeoffs
 
@@ -225,39 +173,20 @@ When the retrieved chunks don't contain the answer, the LLM incorrectly defers e
 | Bedrock Titan embeddings vs. OpenAI | Titan for AWS-native auth | Slightly lower embedding quality than OpenAI ada-002 |
 | Graceful fallback vs. strict grounding | Allow fallback to LLM knowledge | Increases risk of ungrounded answers for out-of-scope queries |
 
-### What I Would Improve
-
-1. **Smaller chunk size (100–150 words)** with sentence-level splitting to preserve specific numeric facts in their own chunks
-2. **System prompt refinement** — instruct the LLM to supplement retrieval results with its own knowledge confidently rather than over-hedging
-3. **Metadata filtering** — tag chunks by section (Introduction, Results, Algorithm) so queries about specific sections can filter before embedding search
-4. **Re-ranking** — add a cross-encoder pass over the top-10 retrieved chunks to improve precision before grounding the LLM
-5. **Formal evaluation set** — 20+ prompts with ground-truth expected tool calls and expected answer content; compute retrieval precision@k and tool selection accuracy
-
 ---
 
 ## h. Deployment
 
-**Platform:** AWS Lambda + Amazon API Gateway (HTTP API v2), deployed via AWS SAM.
+The application is deployed on **AWS Lambda + Amazon API Gateway (HTTP API v2)** via AWS SAM. The Lambda function runs Python 3.12 with 1024MB memory and a 30-second timeout; a Mangum adapter wraps FastAPI to handle the Lambda event format. API Gateway has CORS enabled and routes all paths to the Lambda. Session data and persistent metrics live in a DynamoDB table (`StudyAssistantSessions`) with PAY_PER_REQUEST billing and 7-day TTL on session items. The embedding index is stored in an S3 bucket (`study-assistant-knowledge-991452971884`) as a gzipped JSON file (~2MB, 38 chunks), downloaded once per cold start. The Lambda execution role has `DynamoDBCrudPolicy`, `S3ReadPolicy`, and `bedrock:InvokeModel` on all Bedrock resources.
 
-**Infrastructure (defined in `template.yaml`):**
-- **Lambda function:** Python 3.12, 1024MB memory, 30s timeout; Mangum adapter wraps FastAPI
-- **API Gateway:** HTTP API with CORS enabled; routes all paths to Lambda
-- **DynamoDB:** `StudyAssistantSessions` table; PAY_PER_REQUEST billing; 7-day TTL on session items; also stores persistent metrics under `PK=METRICS`
-- **S3 bucket:** `study-assistant-knowledge-991452971884`; stores `knowledge/embeddings.json.gz` (38 chunks, ~2MB)
-- **IAM:** Lambda execution role with `DynamoDBCrudPolicy`, `S3ReadPolicy`, and `bedrock:InvokeModel` on all Bedrock resources
-
-**Deployment process:**
+The deployment process is three commands:
 ```bash
 python ingest.py          # one-time: embed PDFs, upload to S3
 sam build                 # package Lambda with dependencies
 sam deploy                # deploy/update CloudFormation stack
 ```
 
-**Practical constraints:**
-- Lambda `/tmp` (512MB) is ephemeral — JSONL traces reset on cold start; metrics are in DynamoDB so they persist
-- Cold start latency (~2–3s extra) occurs when Lambda container is recycled; first request after idle period is slower
-- Bedrock Titan embedding adds ~500ms per query for the semantic search step
-- S3 embeddings download (~2MB) only happens on cold start; warm invocations reuse the cached numpy arrays in memory
+A few practical constraints are worth noting. Lambda's `/tmp` (512MB) is ephemeral, so JSONL traces reset on cold start, this is why metrics are stored in DynamoDB instead. Cold starts add ~2–3 seconds of latency when the Lambda container is recycled, making the first request after an idle period noticeably slower. The S3 embeddings download (~2MB) only happens on cold start; warm invocations reuse the cached numpy arrays in memory, keeping retrieval fast.
 
 **Public URL:** https://kpu7oyg4pc.execute-api.us-east-1.amazonaws.com
 
@@ -267,23 +196,18 @@ sam deploy                # deploy/update CloudFormation stack
 
 ### What I Learned
 
-- **Infrastructure-as-code pays off immediately** — having everything in `template.yaml` meant I could tear down and redeploy the entire stack in minutes when things broke. Debugging IAM permission errors would have been much harder without SAM's clear error messages.
-- **Lambda size limits are a real constraint** — ChromaDB's native binaries exceeded Lambda's 250MB unzipped limit, requiring a full redesign to pure-Python numpy cosine search. Choosing dependencies for serverless requires checking unzipped size, not just install size.
-- **Chunk granularity directly determines retrieval quality** — 400-word chunks were too coarse for specific fact retrieval. The evaluation stress tests revealed this clearly: broad conceptual questions worked well, but precise numeric lookups failed.
-- **System prompt wording determines tool selection behavior** — small changes to the system prompt ("ALWAYS call lookup_topic first" vs. "use tools when relevant") had measurable effects on whether the LLM triggered tool calls for borderline queries.
-- **DynamoDB atomic counters are the right tool for serverless metrics** — in-memory counters reset on cold start; file-based logs reset when `/tmp` is recycled. DynamoDB `ADD` expressions are atomic and persist indefinitely at negligible cost.
-- **AWS IAM is the biggest deployment friction** — getting the right policies attached to the right role took more debugging time than writing the application code.
+Building this project taught me several lessons in building a functional chatbot. Having everything defined in `template.yaml` paid off immediately, I could tear down and redeploy the entire stack in minutes when things broke, and debugging IAM permission errors was far more manageable with SAM's clear error messages than it would have been otherwise. Lambda's size limits were a real constraint I underestimated: ChromaDB's native binaries exceeded the 250MB unzipped limit, forcing a full redesign to pure-Python numpy cosine search. Choosing dependencies for serverless requires checking unzipped deployment size, not just install size.
+
+The evaluation stress tests made clear that chunk granularity directly determines retrieval quality: 400-word chunks worked well for broad conceptual questions but failed on precise numeric lookups. I also learned that system prompt wording has measurable effects on tool selection: small changes like "ALWAYS call lookup_topic first" versus "use tools when relevant" noticeably shifted whether the LLM triggered tool calls for borderline queries. Finally, DynamoDB atomic counters are the right tool for serverless metrics, in-memory counters reset on cold start and file-based logs reset when `/tmp` is recycled, but DynamoDB `ADD` expressions are atomic and persist indefinitely at negligible cost.
 
 ### What I Would Improve with More Time
 
-1. **Finer chunk granularity** (100–150 words, sentence-aware splitting) to improve specific fact retrieval
-2. **Re-ranking layer** — a cross-encoder pass over top-10 retrieved chunks before grounding the LLM
-3. **Streaming responses** via Server-Sent Events so the user sees the agent's answer token-by-token rather than waiting 5+ seconds
-4. **Expand the knowledge base** to additional papers (BERT, GPT-2, Flash Attention) so the agent covers more of the course curriculum
-5. **Formal evaluation harness** — automated test suite with ground-truth tool call expectations and answer quality scoring
+1. **Smaller chunk size (100–150 words)** with sentence-level splitting to preserve specific numeric facts in their own chunks
+2. **System prompt refinement**: instruct the LLM to supplement retrieval results with its own knowledge confidently rather than over-hedging
+3. **Metadata filtering**: tag chunks by section (Introduction, Results, Algorithm) so queries about specific sections can filter before embedding search
+4. **Re-ranking**: add a cross-encoder pass over the top-10 retrieved chunks to improve precision before grounding the LLM
+5. **Formal evaluation set**: 20+ prompts with ground-truth expected tool calls and expected answer content; compute retrieval precision@k and tool selection accuracy
 
 ### Design Choices I Would Revisit
 
-- **400-word chunk size** — the stress tests showed this is too coarse; I would use 100–150 word chunks with sentence-boundary awareness from the start
-- **Single embedding model** — Bedrock Titan v2 is convenient but I would benchmark against Cohere or OpenAI embeddings for this domain to verify retrieval quality
-- **No streaming** — the 4–6 second wait per response is the biggest UX friction point; I would implement SSE streaming from the start rather than retrofitting it
+The 400-word chunk size was the most consequential decision I'd change in hindsight. the stress tests showed it's too coarse, and I would use 100–150 word chunks with sentence-boundary awareness from the start. I would also benchmark the embedding model more carefully; Bedrock Titan v2 is convenient but I'd want to compare it against Cohere or OpenAI embeddings for this specific domain before committing. Finally, I would implement SSE streaming from the beginning rather than retrofitting it, the 4–6 second wait per response is the biggest UX friction point and it compounds for multi-tool turns.
